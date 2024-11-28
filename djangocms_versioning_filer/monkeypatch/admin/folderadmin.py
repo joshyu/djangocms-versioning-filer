@@ -1,21 +1,29 @@
+import itertools
 from urllib.parse import quote, unquote
 
 from django.contrib.admin import helpers
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import EmptyPage, PageNotAnInteger, Paginator
 from django.db import models
+from django.db.models import F, OuterRef, Subquery
 from django.db.models.functions import Lower
 from django.http import HttpResponseRedirect
-from django.shortcuts import get_object_or_404, render
-from django.utils.translation import gettext as _, ngettext
+from django.shortcuts import get_object_or_404
+from django.template.response import TemplateResponse
+from django.utils.translation import gettext as _
+from django.utils.translation import ngettext_lazy
+from django.urls import reverse
 
-import filer
+from easy_thumbnails.models import Thumbnail
+
 from djangocms_versioning.constants import DRAFT
+import filer
 from filer.admin.tools import (
     AdminContext,
     admin_url_params_encoded,
     popup_status,
     userperms_for_request,
+    get_directory_listing_type,
 )
 from filer.models import (
     File,
@@ -25,6 +33,9 @@ from filer.models import (
     ImagesWithMissingData,
     UnsortedImages,
     tools,
+)
+from filer.settings import (
+    FILER_PAGINATE_BY, FILER_TABLE_ICON_SIZE, FILER_THUMBNAIL_ICON_SIZE, TABLE_LIST_TYPE,
 )
 from filer.utils.loader import load_model
 
@@ -36,13 +47,6 @@ from ...helpers import (
 )
 from ...models import FileGrouper, get_files_distinct_grouper_queryset
 from ..helpers import SortableHeaderHelper
-
-
-try:
-    # urlresolvers was moved to url in django 2.0
-    from django.urls import reverse
-except ImportError:
-    from django.urls import reverse
 
 
 Image = load_model(filer.settings.FILER_IMAGE_MODEL)
@@ -99,27 +103,41 @@ def order_qs(queryset, order_by_str):
 
 
 def directory_listing(self, request, folder_id=None, viewtype=None):
+    if not request.user.has_perm('filer.can_use_directory_listing'):
+        raise PermissionDenied()
     clipboard = tools.get_user_clipboard(request.user)
     if viewtype == 'images_with_missing_data':
         folder = ImagesWithMissingData()
     elif viewtype == 'unfiled_images':
-        folder = UnsortedImages()
+        # pass user in the class invocation, so that we can get
+        # access to the current user instance in the class
+        folder = UnsortedImages(user=request.user)
     elif viewtype == 'last':
         last_folder_id = request.session.get('filer_last_folder_id')
         try:
             self.get_queryset(request).get(id=last_folder_id)
         except self.model.DoesNotExist:
             url = reverse('admin:filer-directory_listing-root')
-            url = "%s%s" % (url, admin_url_params_encoded(request))
+            url = f'{url}{admin_url_params_encoded(request)}'
         else:
             url = reverse('admin:filer-directory_listing', kwargs={'folder_id': last_folder_id})
-            url = "%s%s" % (url, admin_url_params_encoded(request))
+            url = f'{url}{admin_url_params_encoded(request)}'
         return HttpResponseRedirect(url)
     elif folder_id is None:
         folder = FolderRoot()
     else:
         folder = get_object_or_404(self.get_queryset(request), id=folder_id)
     request.session['filer_last_folder_id'] = folder_id
+
+    list_type = get_directory_listing_type(request) or filer.settings.FILER_FOLDER_ADMIN_DEFAULT_LIST_TYPE
+    if list_type == TABLE_LIST_TYPE:
+        # Prefetch thumbnails for table view
+        size = f'{FILER_TABLE_ICON_SIZE}x{FILER_TABLE_ICON_SIZE}'
+        size_x2 = f'{2 * FILER_TABLE_ICON_SIZE}x{2 * FILER_TABLE_ICON_SIZE}'
+    else:
+        # Prefetch thumbnails for thumbnail view
+        size = f'{FILER_THUMBNAIL_ICON_SIZE}x{FILER_THUMBNAIL_ICON_SIZE}'
+        size_x2 = f'{2 * FILER_THUMBNAIL_ICON_SIZE}x{2 * FILER_THUMBNAIL_ICON_SIZE}'
 
     # Check actions to see if any are available on this changelist
     actions = self.get_actions(request)
@@ -147,16 +165,17 @@ def directory_listing(self, request, folder_id=None, viewtype=None):
 
     if len(search_terms) > 0:
         if folder and limit_search_to_folder and not folder.is_root:
+            desc_folder_ids = folder.get_descendants_ids()
             # Do not include current folder itself in search results.
-            folder_qs = folder.get_descendants(include_self=False)
+            folder_qs = Folder.objects.filter(pk__in=desc_folder_ids)
             # Limit search results to files in the current folder or any
             # nested folder.
             file_qs = get_files_distinct_grouper_queryset().filter(
-                folder__in=folder.get_descendants(include_self=True))
+                    folder_id__in=desc_folder_ids + [folder.pk])
         else:
             folder_qs = self.get_queryset(request)
             file_qs = get_files_distinct_grouper_queryset().all()
-        folder_qs = self.filter_folder(folder_qs, search_terms)
+        folder_qs = self.filter_folder(folder_qs, search_terms).prefetch_related('children', 'all_files')
         file_qs = self.filter_file(file_qs, search_terms)
 
         show_result_count = True
@@ -168,29 +187,45 @@ def directory_listing(self, request, folder_id=None, viewtype=None):
             file_qs = folder.files.all()
         show_result_count = False
 
-    order_by_str = request.GET.get('o', "")
+    folder_qs = folder_qs.order_by('name').select_related('owner')
+    order_by_str = request.GET.get('o', '')
+
     file_qs = order_qs(file_qs, order_by_str)
     folder_qs = order_qs(folder_qs, order_by_str)
 
-    folder_children = []
-    folder_files = []
     if folder.is_root and not search_mode:
         virtual_items = folder.virtual_folders
     else:
         virtual_items = []
 
     perms = FolderPermission.objects.get_read_id_list(request.user)
-    root_exclude_kw = {'parent__isnull': False, 'parent__id__in': perms}
     if perms != 'All':
-        file_qs = file_qs.filter(models.Q(folder__id__in=perms) | models.Q(owner=request.user))
+        file_qs = file_qs.filter(
+            models.Q(folder__id__in=perms)
+            | models.Q(folder_id__isnull=True)
+            | models.Q(owner=request.user)
+        )
         folder_qs = folder_qs.filter(models.Q(id__in=perms) | models.Q(owner=request.user))
+        root_exclude_kwargs = {'parent__isnull': False, 'parent__id__in': perms}
     else:
-        root_exclude_kw.pop('parent__id__in')
+        root_exclude_kwargs = {'parent__isnull': False}
     if folder.is_root:
-        folder_qs = folder_qs.exclude(**root_exclude_kw)
+        folder_qs = folder_qs.exclude(**root_exclude_kwargs)
 
-    folder_children += folder_qs
-    folder_files += file_qs
+    # Annotate thumbnail status
+    thumbnail_qs = (
+        Thumbnail.objects
+        .filter(
+            source__name=OuterRef('file'),
+            modified__gte=F('source__modified'),
+        )
+        .exclude(name__contains='upscale')  # TODO: Check WHY not used by directory listing
+        .order_by('-modified')
+    )
+    file_qs = file_qs.annotate(
+        thumbnail_name=Subquery(thumbnail_qs.filter(name__contains=f'__{size}_').values_list('name')[:1]),
+        thumbnailx2_name=Subquery(thumbnail_qs.filter(name__contains=f'__{size_x2}_').values_list('name')[:1])
+    ).select_related('owner')
 
     try:
         permissions = {
@@ -199,20 +234,17 @@ def directory_listing(self, request, folder_id=None, viewtype=None):
             'has_add_children_permission':
                 folder.has_add_children_permission(request),
         }
-    except:   # noqa
+    except:  # noqa
         permissions = {}
 
-    items = folder_children + folder_files
-    # Get list_per_page from request params else use default value
-    list_per_page = request.GET.get('list_per_page')
-    paginator_count = int(list_per_page) if list_per_page else filer.settings.FILER_PAGINATE_BY
-    paginator = Paginator(items, paginator_count)
+    items = list(itertools.chain(folder_qs, file_qs))
+    paginator = Paginator(items, FILER_PAGINATE_BY)
 
     # Are we moving to clipboard?
     if request.method == 'POST' and '_save' not in request.POST:
         # TODO: Refactor/remove clipboard parts
-        for f in folder_files:
-            if "move-to-clipboard-%d" % (f.id,) in request.POST:
+        for f in folder_qs:
+            if 'move-to-clipboard-%d' % (f.id,) in request.POST:
                 clipboard = tools.get_user_clipboard(request.user)
                 if f.has_edit_permission(request):
                     tools.move_file_to_clipboard([f], clipboard)
@@ -222,21 +254,27 @@ def directory_listing(self, request, folder_id=None, viewtype=None):
 
     selected = request.POST.getlist(helpers.ACTION_CHECKBOX_NAME)
     # Actions with no confirmation
-    if (actions and request.method == 'POST' and
-            'index' in request.POST and '_save' not in request.POST):
+    if (
+        actions and request.method == 'POST'
+        and 'index' in request.POST
+        and '_save' not in request.POST
+    ):
         if selected:
             response = self.response_action(request, files_queryset=file_qs, folders_queryset=folder_qs)
             if response:
                 return response
         else:
-            msg = _("Items must be selected in order to perform "
-                    "actions on them. No items have been changed.")
+            msg = _('Items must be selected in order to perform '
+                    'actions on them. No items have been changed.')
             self.message_user(request, msg)
 
     # Actions with confirmation
-    if (actions and request.method == 'POST' and
-            helpers.ACTION_CHECKBOX_NAME in request.POST and
-            'index' not in request.POST and '_save' not in request.POST):
+    if (
+        actions and request.method == 'POST'
+        and helpers.ACTION_CHECKBOX_NAME in request.POST
+        and 'index' not in request.POST
+        and '_save' not in request.POST
+    ):
         if selected:
             response = self.response_action(request, files_queryset=file_qs, folders_queryset=folder_qs)
             if response:
@@ -249,7 +287,7 @@ def directory_listing(self, request, folder_id=None, viewtype=None):
     else:
         action_form = None
 
-    selection_note_all = ngettext(
+    selection_note_all = ngettext_lazy(
         '%(total_count)s selected',
         'All %(total_count)s selected',
         paginator.count
@@ -276,6 +314,8 @@ def directory_listing(self, request, folder_id=None, viewtype=None):
         'paginated_items': paginated_items,
         'virtual_items': virtual_items,
         'uploader_connections': filer.settings.FILER_UPLOADER_CONNECTIONS,
+        'max_files': filer.settings.FILER_UPLOADER_MAX_FILES,
+        'max_filesize': filer.settings.FILER_UPLOADER_MAX_FILE_SIZE,
         'permissions': permissions,
         'permstest': userperms_for_request(folder, request),
         'current_url': request.path,
@@ -283,8 +323,9 @@ def directory_listing(self, request, folder_id=None, viewtype=None):
         'search_string': ' '.join(search_terms),
         'q': quote(q),
         'show_result_count': show_result_count,
-        'folder_children': folder_children,
-        'folder_files': folder_files,
+        'folder_children': folder_qs,
+        'folder_files': file_qs,
+        'thumbnail_size': FILER_TABLE_ICON_SIZE if list_type == TABLE_LIST_TYPE else FILER_THUMBNAIL_ICON_SIZE,
         'limit_search_to_folder': limit_search_to_folder,
         'is_popup': popup_status(request),
         'filer_admin_context': AdminContext(request),
@@ -296,6 +337,8 @@ def directory_listing(self, request, folder_id=None, viewtype=None):
         'actions_selection_counter': self.actions_selection_counter,
         'selection_note': _('0 of %(cnt)s selected') % {'cnt': len(paginated_items.object_list)},
         'selection_note_all': selection_note_all % {'total_count': paginator.count},
+        'list_type': list_type,
+        'list_type_template': filer.settings.FILER_FOLDER_ADMIN_LIST_TYPE_SWITCHER_SETTINGS[list_type]['template'],
         'media': self.media,
         'enable_permissions': filer.settings.FILER_ENABLE_PERMISSIONS,
         'can_make_folder': request.user.is_superuser or (
@@ -305,7 +348,7 @@ def directory_listing(self, request, folder_id=None, viewtype=None):
         'num_sorted_fields': sortable_header_helper.num_headers_sorted,
         'order_by': order_by_str,
     })
-    return render(request, self.directory_listing_template, context)
+    return TemplateResponse(request, self.directory_listing_template, context)
 
 
 def has_delete_permission(self, request, obj=None):
