@@ -16,7 +16,7 @@
 
       /* create burger menu anchor icon */
       let icon = document.createElement('span');
-      icon.setAttribute('class', "cms-icon cms-icon-settings");
+      icon.setAttribute('class', "cms-icon cms-icon-menu");
 
       let anchor = document.createElement('a');
       anchor.setAttribute('class', 'action-button cms-filer-action-btn closed');

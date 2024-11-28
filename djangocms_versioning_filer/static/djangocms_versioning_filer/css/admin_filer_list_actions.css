@@ -138,3 +138,16 @@ a.cms-actions-dropdown-menu-item-anchor.inactive {
     opacity: 0.3;
     filter: alpha(opacity=30);
 }
+
+.navigation-top-nav .nav-button span {
+    vertical-align: baseline;
+}
+
+.action-button.inactive {
+    opacity: .3;
+}
+
+.filer-icon-reference img {
+    width: 16.8px;
+    height: 16.8px;
+}
