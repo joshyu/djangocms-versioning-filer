@@ -83,3 +83,22 @@ class SortableHeaderHelper:
             else:
                 p[k] = v
         return '?%s' % urlencode(sorted(p.items()))
+
+
+def get_latest_draft_version(version):
+    """Get latest draft version of version object and caches it
+    " restore the previous version in djangocms-versioning PR: #418
+    " because in Versioning Filer, the `version.content` return different Image instance 
+    " everytime, which lead to `AttributeError`.
+    """
+    from djangocms_versioning.constants import DRAFT
+    from djangocms_versioning.models import Version
+
+    if not hasattr(version, "_latest_draft_version"):
+        drafts = (
+            Version.objects
+            .filter_by_content_grouping_values(version.content)
+            .filter(state=DRAFT)
+        )
+        version._latest_draft_version = drafts.first()
+    return version._latest_draft_version
