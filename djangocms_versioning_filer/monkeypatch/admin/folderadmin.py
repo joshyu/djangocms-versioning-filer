@@ -16,7 +16,6 @@ from django.urls import reverse
 
 from easy_thumbnails.models import Thumbnail
 
-from djangocms_versioning import helpers as versioning_helpers
 from djangocms_versioning.constants import DRAFT
 import filer
 from filer.admin.tools import (
@@ -47,7 +46,7 @@ from ...helpers import (
     move_file,
 )
 from ...models import FileGrouper, get_files_distinct_grouper_queryset
-from ..helpers import SortableHeaderHelper, get_latest_draft_version
+from ..helpers import SortableHeaderHelper
 
 
 Image = load_model(filer.settings.FILER_IMAGE_MODEL)
@@ -436,6 +435,3 @@ def get_actions(func):
 filer.admin.folderadmin.FolderAdmin.get_actions = get_actions(  # noqa: E305
     filer.admin.folderadmin.FolderAdmin.get_actions
 )
-
-
-versioning_helpers.get_latest_draft_version = get_latest_draft_version
