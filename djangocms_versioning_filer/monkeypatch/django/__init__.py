@@ -1,0 +1,1 @@
+from .contenttypes import *  # noqa
