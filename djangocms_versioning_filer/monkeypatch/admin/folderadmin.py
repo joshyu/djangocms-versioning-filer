@@ -408,10 +408,14 @@ filer.admin.folderadmin.FolderAdmin.save_model = save_model(  # noqa: E305
 def filer_add_items_to_collection(self, request, files_qs, folders_qs):
     from djangocms_moderation.admin_actions import add_items_to_collection
 
+    folder_ids = []
     for folder in folders_qs:
-        files_qs |= get_files_distinct_grouper_queryset().filter(
-            folder_id__in=[folder.pk, *folder.get_descendants_ids()],
-        )
+        folder_ids.extend([folder.pk, *folder.get_descendants_ids()])
+
+    files_qs |= get_files_distinct_grouper_queryset().filter(
+        folder_id__in=folder_ids,
+    ).distinct()
+
     files_qs = files_qs.filter(versions__state=DRAFT)
     return add_items_to_collection(self, request, files_qs)
 
