@@ -393,7 +393,7 @@ def save_model(func):
         func(self, request, obj, form, change)
         if change and 'name' in form.changed_data and isinstance(obj, Folder):
             published_files = File.objects.filter(
-                folder__in=obj.get_descendants(include_self=True)
+                folder_id__in=[obj.pk, *obj.get_descendants_ids()],
             )
             for f in published_files:
                 f._file_data_changed_hint = False
@@ -410,7 +410,7 @@ def filer_add_items_to_collection(self, request, files_qs, folders_qs):
 
     for folder in folders_qs:
         files_qs |= get_files_distinct_grouper_queryset().filter(
-            folder__in=folder.get_descendants(include_self=True),
+            folder_id__in=[folder.pk, *folder.get_descendants_ids()],
         )
     files_qs = files_qs.filter(versions__state=DRAFT)
     return add_items_to_collection(self, request, files_qs)
