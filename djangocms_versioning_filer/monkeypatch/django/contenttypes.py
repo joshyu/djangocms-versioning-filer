@@ -10,7 +10,7 @@ def generic_foreignkey__get_(func):
     that will lead to the ignore of field cache, and another error in `get_latest_draft_version`
     helper function in djangocms-versioning addon.
 
-    so my temp patch is to pass the comparison of contenttype (version.content_type and the 
+    so my temp patch is to pass the comparison of contenttype (version.content_type and the
     content type of cached field), to correctly use the field cache.
     """
     def inner(self, instance, cls=None):

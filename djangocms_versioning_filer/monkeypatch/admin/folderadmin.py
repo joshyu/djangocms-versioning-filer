@@ -10,20 +10,18 @@ from django.db.models.functions import Lower
 from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.template.response import TemplateResponse
-from django.utils.translation import gettext as _
-from django.utils.translation import ngettext_lazy
 from django.urls import reverse
+from django.utils.translation import gettext as _, ngettext_lazy
 
-from easy_thumbnails.models import Thumbnail
-
-from djangocms_versioning.constants import DRAFT
 import filer
+from djangocms_versioning.constants import DRAFT
+from easy_thumbnails.models import Thumbnail
 from filer.admin.tools import (
     AdminContext,
     admin_url_params_encoded,
+    get_directory_listing_type,
     popup_status,
     userperms_for_request,
-    get_directory_listing_type,
 )
 from filer.models import (
     File,
@@ -35,7 +33,10 @@ from filer.models import (
     tools,
 )
 from filer.settings import (
-    FILER_PAGINATE_BY, FILER_TABLE_ICON_SIZE, FILER_THUMBNAIL_ICON_SIZE, TABLE_LIST_TYPE,
+    FILER_PAGINATE_BY,
+    FILER_TABLE_ICON_SIZE,
+    FILER_THUMBNAIL_ICON_SIZE,
+    TABLE_LIST_TYPE,
 )
 from filer.utils.loader import load_model
 

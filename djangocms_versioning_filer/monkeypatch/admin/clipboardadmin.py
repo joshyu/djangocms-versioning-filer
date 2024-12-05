@@ -38,7 +38,7 @@ def ajax_upload(request, folder_id=None):
     path_split = path.split('/') if path else []
 
     # check permissions and data
-    #error_msg = None
+    # error_msg = None
 
     if not request.user.is_authenticated:
         # User is not logged in. Return a generic message that gives
@@ -103,9 +103,12 @@ def ajax_upload(request, folder_id=None):
                     fields=('original_filename', 'owner', 'file')
                 )
                 break
-        uploadform = FileForm({'original_filename': filename,
-                            'owner': request.user.pk},
-                            {'file': upload})
+        uploadform = FileForm({
+            'original_filename': filename,
+            'owner': request.user.pk
+        },
+          {'file': upload}
+        )
         uploadform.request = request
         uploadform.instance.mime_type = mime_type
 
@@ -118,7 +121,7 @@ def ajax_upload(request, folder_id=None):
             except ValidationError as error:
                 messages.error(request, str(error))
                 return JsonResponse({'error': str(error)})
-            
+
             # Set the file's folder
             current_folder = folder
             for segment in path_split:
@@ -190,14 +193,13 @@ def ajax_upload(request, folder_id=None):
                     # if FILER_ENABLE_LOGGING is on.
                     error_msg = 'failed to generate icons for file'
                     messages.error(request, error_msg)
-                    return JsonResponse({'error': error_msg},status=500)
+                    return JsonResponse({'error': error_msg}, status=500)
 
                 thumbnail = None
                 # Backwards compatibility: try to get specific icon size (32px)
                 # first. Then try medium icon size (they are already sorted),
                 # fallback to the first (smallest) configured icon.
-                for size in (['32'] +
-                            filer_settings.FILER_ADMIN_ICON_SIZES[1::-1]):
+                for size in (['32'] + filer_settings.FILER_ADMIN_ICON_SIZES[1::-1]):
                     try:
                         thumbnail = file_obj.icons[size]
                         break
