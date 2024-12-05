@@ -1,7 +1,10 @@
+from django.contrib import messages
+from django.core.exceptions import ValidationError
 from django.db.models import Value
 from django.db.models.functions import Coalesce
 from django.forms.models import modelform_factory
 from django.http import JsonResponse
+from django.urls import reverse
 from django.views.decorators.csrf import csrf_exempt
 
 import filer
@@ -15,6 +18,7 @@ from filer.utils.files import (
     handle_upload,
 )
 from filer.utils.loader import load_model
+from filer.validation import validate_upload
 
 from ...helpers import create_file_version
 from ...models import (
@@ -26,34 +30,47 @@ from ...models import (
 
 @csrf_exempt
 def ajax_upload(request, folder_id=None):
+    """
+    Receives an upload from the uploader. Receives only one file at a time.
+    """
     folder = None
     path = request.POST.get('path')
     path_split = path.split('/') if path else []
 
     # check permissions and data
-    error_msg = None
+    #error_msg = None
+
     if not request.user.is_authenticated:
         # User is not logged in. Return a generic message that gives
         # no data info (such as whether a folder exists or not)
-        error_msg = filer.admin.clipboardadmin.NO_PERMISSIONS_FOR_FOLDER
-    elif folder_id:
+        messages.error(request, filer.admin.clipboardadmin.NO_PERMISSIONS_FOR_FOLDER)
+        return JsonResponse({'error': filer.admin.clipboardadmin.NO_PERMISSIONS_FOR_FOLDER})
+
+    if not request.user.has_perm("filer.add_file"):
+        messages.error(request, filer.admin.clipboardadmin.NO_PERMISSIONS)
+        return JsonResponse({'error': filer.admin.clipboardadmin.NO_PERMISSIONS})
+
+    if folder_id:
         try:
+            # Get folder
             folder = Folder.objects.get(pk=folder_id)
         except Folder.DoesNotExist:
             # A folder with id=folder_id does not exist so return
             # an error message specifying this
-            error_msg = filer.admin.clipboardadmin.NO_FOLDER_ERROR
-        else:
-            # Now check if the user has sufficient permissions to
-            # upload a file to the folder with id=folder_id and return
-            # an error message if not
-            no_folder_perms = (
-                not folder.has_add_children_permission(request) or
-                (path and not folder.can_have_subfolders)
-            )
-            if no_folder_perms:
-                error_msg = filer.admin.clipboardadmin.NO_PERMISSIONS_FOR_FOLDER
-    elif (
+            messages.error(request, filer.admin.clipboardadmin.NO_FOLDER_ERROR)
+            return JsonResponse({'error': filer.admin.clipboardadmin.NO_FOLDER_ERROR})
+    else:
+        folder = Folder.objects.filter(pk=request.session.get('filer_last_folder_id', 0)).first()
+
+    # check permissions
+    if folder and (
+        not folder.has_add_children_permission(request) or
+        (path and not folder.can_have_subfolders)
+    ):
+        messages.error(request, filer.admin.clipboardadmin.NO_PERMISSIONS_FOR_FOLDER)
+        return JsonResponse({'error': filer.admin.clipboardadmin.NO_PERMISSIONS_FOR_FOLDER})
+
+    if (
         not request.user.is_superuser and
         path_split and
         not filer.settings.FILER_ALLOW_REGULAR_USERS_TO_ADD_ROOT_FOLDERS
@@ -65,14 +82,12 @@ def ajax_upload(request, folder_id=None):
         # specifying the path param with folders that don't yet exist)
         # return an error message
         if not Folder.objects.filter(name=path_split[0], parent=None).exists():
-            error_msg = filer.admin.clipboardadmin.NO_PERMISSIONS_FOR_FOLDER
-
-    if error_msg:
-        return JsonResponse({'error': error_msg})
+            messages.error(request, filer.admin.clipboardadmin.NO_PERMISSIONS_FOR_FOLDER)
+            return JsonResponse({'error': filer.admin.clipboardadmin.NO_PERMISSIONS_FOR_FOLDER})
 
     try:
         if len(request.FILES) == 1:
-            # dont check if request is ajax or not, just grab the file
+            # don't check if request is ajax or not, just grab the file
             upload, filename, is_raw, mime_type = handle_request_files_upload(request)
         else:
             # else process the request as usual
@@ -89,13 +104,21 @@ def ajax_upload(request, folder_id=None):
                 )
                 break
         uploadform = FileForm({'original_filename': filename,
-                               'owner': request.user.pk},
-                              {'file': upload})
-        if uploadform.is_valid():
-            file_obj = uploadform.save(commit=False)
-            # Enforce the FILER_IS_PUBLIC_DEFAULT
-            file_obj.is_public = filer_settings.FILER_IS_PUBLIC_DEFAULT
+                            'owner': request.user.pk},
+                            {'file': upload})
+        uploadform.request = request
+        uploadform.instance.mime_type = mime_type
 
+        if uploadform.is_valid():
+            try:
+                validate_upload(filename, upload, request.user, mime_type)
+                file_obj = uploadform.save(commit=False)
+                # Enforce the FILER_IS_PUBLIC_DEFAULT
+                file_obj.is_public = filer_settings.FILER_IS_PUBLIC_DEFAULT
+            except ValidationError as error:
+                messages.error(request, str(error))
+                return JsonResponse({'error': str(error)})
+            
             # Set the file's folder
             current_folder = folder
             for segment in path_split:
@@ -107,6 +130,7 @@ def ajax_upload(request, folder_id=None):
                     # return a permission error
                     if current_folder and not current_folder.can_have_subfolders:
                         error_msg = filer.admin.clipboardadmin.NO_PERMISSIONS_FOR_FOLDER
+                        messages.error(request, error_msg)
                         return JsonResponse({'error': error_msg})
                     current_folder = Folder.objects.create(
                         name=segment, parent=current_folder)
@@ -115,7 +139,9 @@ def ajax_upload(request, folder_id=None):
                     # allowed to upload here
                     if not current_folder.has_add_children_permission(request):
                         error_msg = filer.admin.clipboardadmin.NO_PERMISSIONS_FOR_FOLDER
+                        messages.error(request, error_msg)
                         return JsonResponse({'error': error_msg})
+
             file_obj.folder = current_folder
             file_obj.mime_type = mime_type
 
@@ -138,9 +164,11 @@ def ajax_upload(request, folder_id=None):
                     existing_file_version.can_be_archived(),
                     existing_file_version.check_archive.as_bool(request.user),
                 ]):
-                    return JsonResponse({'error': (
+                    error_msg = (
                         'Cannot archive existing {} file version'.format(existing_file_obj)
-                    )})
+                    )
+                    messages.error(request, error_msg)
+                    return JsonResponse({'error': error_msg})
             else:
                 new_file_grouper = True
                 file_grouper = FileGrouper.objects.create()
@@ -149,52 +177,57 @@ def ajax_upload(request, folder_id=None):
             file_obj.save()
             create_file_version(file_obj, request.user)
 
-            # Try to generate thumbnails.
-            if not file_obj.icons:
-                # There is no point to continue, as we can't generate
-                # thumbnails for this file. Usual reasons: bad format or
-                # filename.
-                file_obj.delete()
-                if new_file_grouper:
-                    file_grouper.delete()
-                # This would be logged in BaseImage._generate_thumbnails()
-                # if FILER_ENABLE_LOGGING is on.
-                return JsonResponse(
-                    {'error': 'failed to generate icons for file'},
-                    status=500,
-                )
-            thumbnail = None
-            # Backwards compatibility: try to get specific icon size (32px)
-            # first. Then try medium icon size (they are already sorted),
-            # fallback to the first (smallest) configured icon.
-            for size in (['32'] +
-                         filer_settings.FILER_ADMIN_ICON_SIZES[1::-1]):
-                try:
-                    thumbnail = file_obj.icons[size]
-                    break
-                except KeyError:
-                    continue
+            try:
+                # Try to generate thumbnails.
+                if not file_obj.icons:
+                    # There is no point to continue, as we can't generate
+                    # thumbnails for this file. Usual reasons: bad format or
+                    # filename.
+                    file_obj.delete()
+                    if new_file_grouper:
+                        file_grouper.delete()
+                    # This would be logged in BaseImage._generate_thumbnails()
+                    # if FILER_ENABLE_LOGGING is on.
+                    error_msg = 'failed to generate icons for file'
+                    messages.error(request, error_msg)
+                    return JsonResponse({'error': error_msg},status=500)
 
-            data = {
-                'thumbnail': thumbnail,
-                'alt_text': '',
-                'label': str(file_obj),
-                'file_id': file_obj.pk,
-                'grouper_id': file_grouper.pk,
-            }
-            # prepare preview thumbnail
-            if type(file_obj) is Image:
-                thumbnail_180_options = {
-                    'size': (180, 180),
-                    'crop': True,
-                    'upscale': True,
+                thumbnail = None
+                # Backwards compatibility: try to get specific icon size (32px)
+                # first. Then try medium icon size (they are already sorted),
+                # fallback to the first (smallest) configured icon.
+                for size in (['32'] +
+                            filer_settings.FILER_ADMIN_ICON_SIZES[1::-1]):
+                    try:
+                        thumbnail = file_obj.icons[size]
+                        break
+                    except KeyError:
+                        continue
+
+                data = {
+                    'thumbnail': thumbnail,
+                    'alt_text': '',
+                    'label': str(file_obj),
+                    'file_id': file_obj.pk,
+                    'grouper_id': file_grouper.pk,
                 }
-                thumbnail_180 = file_obj.file.get_thumbnail(
-                    thumbnail_180_options)
-                data['thumbnail_180'] = thumbnail_180.url
-                data['original_image'] = file_obj.url
-            return JsonResponse(data)
+
+                # prepare preview thumbnail
+                if isinstance(file_obj, Image):
+                    data['thumbnail_180'] = reverse(
+                        f"admin:filer_{file_obj._meta.model_name}_fileicon",
+                        args=(file_obj.pk, filer_settings.FILER_THUMBNAIL_ICON_SIZE),
+                    )
+                    data['original_image'] = file_obj.url
+                return JsonResponse(data)
+            except Exception as error:
+                messages.error(request, str(error))
+                return JsonResponse({"error": str(error)})
         else:
+            for key, error_list in uploadform.errors.items():
+                for error in error_list:
+                    messages.error(request, error)
+
             form_errors = '; '.join(['%s: %s' % (
                 field,
                 ', '.join(errors)) for field, errors in list(
@@ -206,4 +239,5 @@ def ajax_upload(request, folder_id=None):
     except UploadException as e:
         # TODO: Test
         return JsonResponse({'error': str(e)}, status=500)
+
 filer.admin.clipboardadmin.ajax_upload = ajax_upload  # noqa: E305

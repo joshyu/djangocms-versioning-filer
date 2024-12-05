@@ -29,10 +29,9 @@ def move_file(file_content, destination):
 
 
 def get_published_file_path(file_obj):
-    if file_obj.folder:
-        path = file_obj.folder.get_ancestors(
-            include_self=True,
-        ).values_list('name', flat=True)
+    cur_folder = file_obj.folder
+    if cur_folder:
+        path = [fd.name for fd in [*cur_folder.logical_path, cur_folder]]
     else:
         path = []
     path = list(path) + [file_obj.original_filename]

@@ -4,7 +4,8 @@ Changelog
 
 Unreleased
 ==========
-* 
+* make it compatible with django-filer 3.3+
+* make it compatible with CMS 4.1+
 
 1.3.2 (2024-11-12)
 ==========
